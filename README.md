@@ -1,3 +1,5 @@
+## Web UI/UX
+- Video: https://github.com/xiv3r/esp32-4in1-carwash/releases/download/v1.0/4in1carwash.mp4
 
 ## Table of Contents
 
