@@ -1,5 +1,5 @@
 // ======================================================
-// ESP32 38Pins 4in1 Carwash Vendo Codebase
+// ESP32 38Pin 4IN1 CARWASH SYSTEM 
 // ======================================================
 
 #include <Arduino.h>
@@ -51,17 +51,17 @@
 #define AP_GUARD_INTERVAL_US    5000000ULL
 #define LCD_PROBE_INTERVAL_US   15000000ULL
 #define SESSION_SAVE_MIN_US     2000000ULL
-#define MAX_TIMER_SECONDS       35999ULL
+#define LCD_MAX_SECONDS         3599999ULL
 #define RELAY_SETTLE_MS         0
 
 // ======================================================
 // DEFAULT PIN MAP
 // ======================================================
 
-#define PIN_DEFAULT_RELAY_WATER   13
-#define PIN_DEFAULT_RELAY_BLOWER  16
+#define PIN_DEFAULT_RELAY_WATER   19
+#define PIN_DEFAULT_RELAY_BLOWER  18
 #define PIN_DEFAULT_RELAY_SOAP    17
-#define PIN_DEFAULT_RELAY_FOAM    18
+#define PIN_DEFAULT_RELAY_FOAM    16
 #define PIN_DEFAULT_BTN_WATER     32
 #define PIN_DEFAULT_BTN_BLOWER    33
 #define PIN_DEFAULT_BTN_SOAP      27
@@ -586,7 +586,7 @@ static void configSetDefaults(Config& cfg) {
   cfg.apChannel = 1;
   cfg.apHidden = 0;
   cfg.apMaxClients = 4;
-  cfg.timeModel = TMO_SHARED_SINGLE;
+  cfg.timeModel = TMO_ALLOCATED;
   cfg.relayPin[CH_WATER] = PIN_DEFAULT_RELAY_WATER;
   cfg.relayPin[CH_BLOWER] = PIN_DEFAULT_RELAY_BLOWER;
   cfg.relayPin[CH_SOAP] = PIN_DEFAULT_RELAY_SOAP;
@@ -1051,7 +1051,8 @@ static void statsLoad() {
   Stats st;
   size_t got = g_prefs.getBytesLength(NVS_KEY_STATS);
   if (got == sizeof(Stats) && g_prefs.getBytes(NVS_KEY_STATS, &st, sizeof(Stats)) == sizeof(Stats)) {
-    if (st.magic == STATS_MAGIC && st.version == STATS_VERSION) {
+    if (st.magic == STATS_MAGIC && st.version == STATS_VERSION &&
+        st.sessionHead < SESSION_RING_LEN && st.sessionCount <= SESSION_RING_LEN) {
       g_stats = st;
       return;
     }
@@ -1069,7 +1070,6 @@ static bool statsSaveNow() {
   g_nvsWrites++;
   bool ok = (written == sizeof(Stats));
   g_statsDirty = ok ? 0 : 1;
-  // Limit retry frequency on storage failure while keeping unsaved data dirty.
   g_lastStatsSaveUs = timeNowUs();
   g_meta.nvsWrites = g_nvsWrites;
   return ok;
@@ -1149,27 +1149,43 @@ static void cmdQueueReset() {
   portEXIT_CRITICAL(&g_mux);
 }
 
-static bool configPush(const Config& cfg) {
+static bool configPushIfCurrent(const Config& cfg, uint32_t revision) {
   bool ok = false;
   portENTER_CRITICAL(&g_mux);
-  g_pendingCfg = cfg;
-  g_pendingCfgSeq = g_pendingCfgSeq + 1;
-  g_pendingCfgFlag = 1;
-  ok = true;
+  if (g_pendingCfgFlag == 0 && g_pub.state.cfgRevision == revision) {
+    g_pendingCfg = cfg;
+    g_pendingCfgSeq = g_pendingCfgSeq + 1;
+    g_pendingCfgFlag = 1;
+    ok = true;
+  }
   portEXIT_CRITICAL(&g_mux);
   return ok;
+}
+
+static bool configPush(const Config& cfg) {
+  uint32_t revision;
+  portENTER_CRITICAL(&g_mux);
+  revision = g_pub.state.cfgRevision;
+  portEXIT_CRITICAL(&g_mux);
+  return configPushIfCurrent(cfg, revision);
 }
 
 static bool configTakePending(Config& out) {
   bool ok = false;
   portENTER_CRITICAL(&g_mux);
-  if (g_pendingCfgFlag) {
+  if (g_pendingCfgFlag == 1) {
     out = g_pendingCfg;
-    g_pendingCfgFlag = 0;
+    g_pendingCfgFlag = 2;
     ok = true;
   }
   portEXIT_CRITICAL(&g_mux);
   return ok;
+}
+
+static void configFinishPending() {
+  portENTER_CRITICAL(&g_mux);
+  g_pendingCfgFlag = 0;
+  portEXIT_CRITICAL(&g_mux);
 }
 
 // ======================================================
@@ -1324,8 +1340,6 @@ static void buzzerPlay(uint8_t pattern);
 
 static void channelFinish(uint8_t ch, uint8_t reason) {
   uint32_t durationSec = (uint32_t)(g_ch[ch].usedMs / 1000ULL);
-  // Unused paid time must not disappear on stop, safety timeout, or mode change.
-  // A temporarily over-cap pool is allowed to drain, but cannot receive new credit.
   if (g_cfg.timeModel == TMO_ALLOCATED) {
     g_poolMs += g_ch[ch].remainMs;
   }
@@ -1382,6 +1396,7 @@ static bool channelPause(uint8_t ch) {
     return false;
   }
   g_ch[ch].state = CHS_PAUSED;
+  g_ch[ch].lastBlinkToggleUs = timeNowUs();
   relayApplyChannel(ch);
   buzzerPlay(BUZ_PAUSE);
   return true;
@@ -1743,8 +1758,13 @@ static void buttonPollAll(uint64_t nowUs) {
 
 static void buttonHandleSingle(uint8_t ch) {
   g_share.lastButtonChannel = ch;
-  g_ch[ch].lastBlinkToggleUs = timeNowUs();
-  g_ch[ch].blinkPhase = 1;
+  if (g_cfg.timeModel == TMO_ALLOCATED && g_poolMs > 0) {
+    uint64_t cap = creditCapMs();
+    uint64_t room = (g_ch[ch].remainMs < cap) ? cap - g_ch[ch].remainMs : 0;
+    uint64_t transfer = (g_poolMs < room) ? g_poolMs : room;
+    g_ch[ch].remainMs += transfer;
+    g_poolMs -= transfer;
+  }
   if (g_ch[ch].state == CHS_RUNNING) {
     buzzerPlay(BUZ_CLICK);
     return;
@@ -1852,13 +1872,13 @@ static CoinAward coinResolve(uint32_t pulses) {
   uint64_t perPulseSec = (basePulses > 0) ? (baseSec / basePulses) : 0ULL;
   uint64_t total = baseSec + (extraPulses * perPulseSec);
   if (total < baseSec) {
-    total = MAX_TIMER_SECONDS;
+    total = UINT32_MAX;
   }
   uint64_t baseValue = (uint64_t)g_cfg.coinMap[bestIdx].valueCentavos;
   uint64_t perPulseValue = (basePulses > 0) ? (baseValue / basePulses) : 0ULL;
   uint64_t totalValue = baseValue + (extraPulses * perPulseValue);
-  if (total > MAX_TIMER_SECONDS) {
-    total = MAX_TIMER_SECONDS;
+  if (total > UINT32_MAX) {
+    total = UINT32_MAX;
   }
   if (totalValue > 100000000ULL) {
     totalValue = 100000000ULL;
@@ -1946,8 +1966,6 @@ static void coinProcessRing(uint64_t nowUs) {
         (ts - g_coinLastPulseUs) < minGapUs) {
       continue;
     }
-    // A delayed consumer may find multiple physical groups in the ring.
-    // Split using the captured edge times, not just the time of this tick.
     if (g_coinGroupActive == 1 && ts >= g_coinLastPulseUs &&
         (ts - g_coinLastPulseUs) >= groupGapUs) {
       uint32_t pulses = g_coinGroupPulses;
@@ -1966,14 +1984,12 @@ static void coinProcessRing(uint64_t nowUs) {
       g_coinGroupStartUs = ts;
       g_coinGroupPulses = 0;
     }
-    // Cap one physical pulse train; do not manufacture extra coins on overflow.
     if (g_coinGroupPulses < (uint32_t)g_cfg.coinMaxPulses) {
       g_coinGroupPulses++;
       if (g_cfg.pulseOutEnabled == 1 && g_pulseOutPending < 64) {
         g_pulseOutPending++;
       }
     }
-    // Even ignored excess pulses extend the train's quiet-period timer.
     g_coinLastPulseUs = ts;
   }
 
@@ -2164,8 +2180,8 @@ static void lcdInit() {
 
 static void lcdFormatTime(uint64_t remainMs, char* out, size_t outLen) {
   uint64_t sec = remainMs / 1000ULL;
-  if (sec > MAX_TIMER_SECONDS) {
-    sec = MAX_TIMER_SECONDS;
+  if (sec > LCD_MAX_SECONDS) {
+    sec = LCD_MAX_SECONDS;
   }
   uint32_t total = (uint32_t)sec;
   if (total < 6000UL) {
@@ -2213,7 +2229,7 @@ static void lcdPadRow(char* row, size_t len) {
 static void lcdBuildChannelRow(uint8_t ch, uint64_t nowUs, char* out, size_t outLen) {
   char timeText[8];
   bool blinkOff = false;
-  if (g_ch[ch].state != CHS_IDLE && ch == g_share.lastButtonChannel) {
+  if (g_ch[ch].state == CHS_PAUSED) {
     uint64_t blinkIntervalUs = (uint64_t)g_cfg.lcdBlinkMs * 1000ULL;
     uint64_t sinceUs = (nowUs >= g_ch[ch].lastBlinkToggleUs) ? (nowUs - g_ch[ch].lastBlinkToggleUs) : 0ULL;
     if (blinkIntervalUs > 0) {
@@ -2992,7 +3008,7 @@ static void handleApiState() {
     jsonU32("relay", (uint32_t)cfg.relayPin[i]);
     jsonU32("btn", (uint32_t)cfg.btnPin[i]);
     jsonU32("relayOn", (uint32_t)s.channelRelay[i]);
-    jsonU32("blink", (uint32_t)((s.lastButtonChannel == i) ? s.blinkPhase[i] : 0u));
+    jsonU32("blink", (uint32_t)s.blinkPhase[i]);
     jsonObjEnd();
   }
   jsonArrEnd();
@@ -3119,7 +3135,7 @@ static void handleApiConfigPost() {
     jsonSendError(400, err);
     return;
   }
-  if (!configPush(next)) {
+  if (!configPushIfCurrent(next, g_pubLocal.state.cfgRevision)) {
     jsonSendError(503, "busy");
     return;
   }
@@ -3139,7 +3155,7 @@ static void handleApiConfigDefaults() {
   }
   Config defaults;
   configSetDefaults(defaults);
-  if (!configPush(defaults)) {
+  if (!configPushIfCurrent(defaults, g_pubLocal.state.cfgRevision)) {
     jsonSendError(503, "busy");
     return;
   }
@@ -3493,8 +3509,7 @@ static void handleApiDiag() {
 // EMBEDDED WEB APPLICATION
 // ======================================================
 
-static const char APP_HTML[] PROGMEM = R"RAWHTML(
-<!doctype html>
+static const char APP_HTML[] PROGMEM = R"RAWHTML(<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
@@ -4568,7 +4583,7 @@ FOAM  --:-- OFF</div>
                 <div class="field">
                   <label for="setLcdBlink">Blink interval</label>
                   <input class="input" id="setLcdBlink" type="number" min="120" max="2000" step="20" data-field="lcdBlinkMs">
-                  <div class="hint">Blink rate for the remaining time of the selected function.</div>
+                  <div class="hint">Blink rate for the remaining time of each paused function.</div>
                 </div>
               </div>
               <div class="form-actions">
@@ -4591,7 +4606,7 @@ FOAM  --:-- OFF</div>
                 <div class="lcd-meta"><span id="lcdAddrLabel2">0x27</span><span id="lcdBusLabel2">SDA 21 / SCL 22</span></div>
               </div>
               <div class="notice" style="margin-top:14px">
-                <div>Row layout: function name, remaining time, state. The selected function blinks its counter while it runs.</div>
+                <div>Row layout: function name, remaining time, state. Each paused function blinks its counter; the display stops blinking when it resumes.</div>
               </div>
             </div>
           </div>
@@ -4609,7 +4624,7 @@ FOAM  --:-- OFF</div>
         </div>
 
         <form class="card" data-settings-form="io" novalidate>
-          <div class="card-head"><div><h3 id="ioTitle">Relay outputs</h3><span>WATER 13, BLOWER 16, SOAP 17, FOAM 18 by default</span></div></div>
+          <div class="card-head"><div><h3 id="ioTitle">Relay outputs</h3><span>WATER 19, BLOWER 18, SOAP 17, FOAM 16 by default</span></div></div>
           <div class="card-body">
             <div class="form-grid">
               <div class="field">
@@ -5219,15 +5234,17 @@ FOAM  --:-- OFF</div>
   }
 
   const loadConfig = function (force) {
-    if (!force && app.loadedCfg) { return Promise.resolve(); }
+    if (!force && app.loadedCfg) { return Promise.resolve(true); }
     var request = function () { return apiGet("api/config"); };
     return (force ? withPinRetry(request) : request()).then(function (data) {
       if (data && typeof data === "object" && data.ok !== 0) {
         app.cfg = data;
         app.loadedCfg = true;
         renderConfig();
+        return true;
       }
-    }).catch(function () {});
+      return false;
+    }).catch(function () { return false; });
   }
 
   const loadDiag = function () {
@@ -5739,7 +5756,7 @@ FOAM  --:-- OFF</div>
         return null;
       }
       
-      return waitForRevision(previous).then(function (changed) {
+      return waitForRevision(num(res.cfgRevision, previous)).then(function (changed) {
         if (changed) {
           toast("ok", "Settings saved", "Applied and stored in flash.");
           loadConfig(true);
@@ -5817,7 +5834,10 @@ FOAM  --:-- OFF</div>
       }
       var reload = e.target.closest ? e.target.closest("[data-reload]") : null;
       if (reload) {
-        loadConfig(true).then(function () { toast("ok", "Reloaded", "Values restored from the controller."); });
+        loadConfig(true).then(function (loaded) {
+          if (loaded) { toast("ok", "Reloaded", "Values restored from the controller."); }
+          else { toast("err", "Reload failed", "Configuration was not loaded."); }
+        });
       }
     });
 
@@ -5839,7 +5859,7 @@ FOAM  --:-- OFF</div>
       var seconds = num($("#creditSeconds").value, 0);
       if (seconds < 1) { toast("err", "Invalid amount", "Enter at least one second."); return; }
       withPinRetry(function () { return apiPost("api/credit", { seconds: seconds }); }).then(function (res) {
-        if (res && res.ok === 1) { toast("ok", "Credit added", seconds + " seconds added to the pool."); loadState().catch(function () {}); }
+        if (res && res.ok === 1) { toast("ok", "Credit command queued", "The controller will process " + seconds + " seconds."); loadState().catch(function () {}); }
         else { toast("err", "Rejected", res && res.error ? String(res.error) : "Try again."); }
       }).catch(function () {});
     });
@@ -5848,7 +5868,7 @@ FOAM  --:-- OFF</div>
 
     $("#btnSaveStats").addEventListener("click", function () {
       withPinRetry(function () { return apiPost("api/stats/save", {}); }).then(function (res) {
-        if (res && res.ok === 1) { toast("ok", "Statistics committed", "Written to flash."); }
+        if (res && res.ok === 1) { toast("ok", "Statistics save queued", "The controller will attempt to write to flash."); }
       }).catch(function () {});
     });
 
@@ -5856,7 +5876,7 @@ FOAM  --:-- OFF</div>
       confirmAction("Clear session journal", "The recent session list will be erased. Sales totals are kept.", "Clear journal").then(function (yes) {
         if (!yes) { return; }
         withPinRetry(function () { return apiPost("api/sessions/clear", { confirm: "CLEAR" }); }).then(function (res) {
-          if (res && res.ok === 1) { toast("ok", "Journal cleared", ""); loadStats(true); }
+          if (res && res.ok === 1) { toast("ok", "Journal clear queued", ""); loadStats(true); }
           else { toast("err", "Rejected", "Confirmation failed."); }
         }).catch(function () {});
       });
@@ -5866,7 +5886,7 @@ FOAM  --:-- OFF</div>
       confirmAction("Reset sales statistics", "All time revenue, coins, runtime and the session journal will be reset to zero. Configuration is kept.", "Reset statistics", true).then(function (yes) {
         if (!yes) { return; }
         withPinRetry(function () { return apiPost("api/stats/reset", { confirm: "RESET" }); }).then(function (res) {
-          if (res && res.ok === 1) { toast("ok", "Statistics reset", "All counters start from zero."); loadStats(true); setTimeout(function () { loadState().catch(function () {}); }, 400); }
+          if (res && res.ok === 1) { toast("ok", "Statistics reset queued", "The controller will process the request."); loadStats(true); setTimeout(function () { loadState().catch(function () {}); }, 400); }
           else { toast("err", "Rejected", "Confirmation failed."); }
         }).catch(function () {});
       });
@@ -5923,11 +5943,17 @@ FOAM  --:-- OFF</div>
           if (!yes) { return; }
           withPinRetry(function () { return apiPost("api/restore", payload); }).then(function (res) {
             if (res && res.ok === 1) {
-              toast("ok", "Configuration restored", "Reconnect if the network name changed.");
-              loadConfig(true);
-            } else {
-              toast("err", "Restore rejected", res && res.error ? String(res.error) : "Invalid values in the file.");
+              var previous = num(res.cfgRevision, num(app.state && app.state.cfgRevision, 0));
+              return waitForRevision(previous).then(function (changed) {
+                if (changed) {
+                  toast("ok", "Configuration restored", "Reconnect if the network name changed.");
+                  loadConfig(true);
+                } else {
+                  toast("err", "Restore timed out", "The controller did not confirm the configuration.");
+                }
+              });
             }
+            toast("err", "Restore rejected", res && res.error ? String(res.error) : "Invalid values in the file.");
           }).catch(function () {});
         });
       };
@@ -6021,11 +6047,10 @@ FOAM  --:-- OFF</div>
 </script>
 </body>
 </html>
-
 )RAWHTML";
 
 // ======================================================
-//  HTTP ROUTE TABLE
+// HTTP ROUTE TABLE
 // ======================================================
 
 static void handleRootDocument() {
@@ -6106,7 +6131,7 @@ static void registerRoutes() {
 }
 
 // ======================================================
-//  WEB SERVICE TASK
+// WEB SERVICE TASK
 // ======================================================
 
 static void webServiceTask(void* param) {
@@ -6193,18 +6218,32 @@ static void commandExecute(const Command& cmd) {
   }
 }
 
+static bool cmdTakeDue(uint64_t nowUs, Command& out) {
+  bool found = false;
+  portENTER_CRITICAL(&g_mux);
+  for (uint8_t offset = 0; offset < g_cmdCount; ++offset) {
+    uint8_t slot = (uint8_t)((g_cmdHead + offset) % CMD_QUEUE_LEN);
+    if (g_cmdQueue[slot].executeAtUs > nowUs) continue;
+    out = g_cmdQueue[slot];
+    for (uint8_t i = offset; i + 1 < g_cmdCount; ++i) {
+      uint8_t dst = (uint8_t)((g_cmdHead + i) % CMD_QUEUE_LEN);
+      uint8_t src = (uint8_t)((g_cmdHead + i + 1) % CMD_QUEUE_LEN);
+      g_cmdQueue[dst] = g_cmdQueue[src];
+    }
+    g_cmdTail = (uint8_t)((g_cmdTail + CMD_QUEUE_LEN - 1) % CMD_QUEUE_LEN);
+    g_cmdCount--;
+    found = true;
+    break;
+  }
+  portEXIT_CRITICAL(&g_mux);
+  return found;
+}
+
 static void commandProcess(uint64_t nowUs) {
   Command cmd;
   uint8_t guard = 0;
-  while (guard < CMD_QUEUE_LEN && cmdPop(cmd)) {
+  while (guard < CMD_QUEUE_LEN && cmdTakeDue(nowUs, cmd)) {
     guard++;
-    if (nowUs < cmd.executeAtUs) {
-      if (!cmdPush(cmd.type, cmd.channel, cmd.seconds, cmd.value,
-                   (uint32_t)((cmd.executeAtUs - nowUs) / 1000ULL))) {
-        break;
-      }
-      break;
-    }
     commandExecute(cmd);
   }
 }
@@ -6331,9 +6370,11 @@ static void configApplyPending() {
   }
   char err[32];
   if (!validateConfig(next, err, sizeof(err))) {
+    configFinishPending();
     return;
   }
   if (!configSave(next)) {
+    configFinishPending();
     return;
   }
   configApplyLive(next);
@@ -6341,6 +6382,7 @@ static void configApplyPending() {
   g_statsSaveSuspended = 0;
   publishStatsAndConfig();
   publishState();
+  configFinishPending();
 }
 
 // ======================================================
@@ -6376,7 +6418,7 @@ static void statsSaveTick(uint64_t nowUs) {
 }
 
 // ======================================================
-//  STATE PUBLISHING
+// STATE PUBLISHING
 // ======================================================
 
 static void publishTick(uint64_t nowUs) {
@@ -6398,11 +6440,11 @@ static void publishTick(uint64_t nowUs) {
       active++;
     }
     uint8_t phase = 0;
-    if (g_ch[i].state != CHS_IDLE && i == g_share.lastButtonChannel) {
+    if (g_ch[i].state == CHS_PAUSED) {
       uint64_t intervalUs = (uint64_t)g_cfg.lcdBlinkMs * 1000ULL;
       if (intervalUs > 0) {
         uint64_t sinceUs = (nowUs >= g_ch[i].lastBlinkToggleUs) ? (nowUs - g_ch[i].lastBlinkToggleUs) : 0ULL;
-        phase = (uint8_t)(((sinceUs / intervalUs) % 2ULL) == 0ULL ? 1 : 0);
+        phase = (uint8_t)(((sinceUs / intervalUs) % 2ULL) == 1ULL ? 1 : 0);
       }
     }
     g_share.blinkPhase[i] = phase;
@@ -6535,9 +6577,6 @@ void setup() {
 void loop() {
   uint64_t nowUs = timeNowUs();
   uint64_t deltaUs = (nowUs >= g_lastTickUs) ? (nowUs - g_lastTickUs) : 0ULL;
-  if (deltaUs > 5000000ULL) {
-    deltaUs = 5000000ULL;
-  }
   g_lastTickUs = nowUs;
 
   if (g_bootComplete == 0 && (nowUs - g_bootUs) > 2500000ULL) {
@@ -6546,13 +6585,13 @@ void loop() {
     g_lcdNextRefreshUs = nowUs;
   }
 
+  engineTick(deltaUs);
+  statsTick(deltaUs);
   commandProcess(nowUs);
   configApplyPending();
   buttonPollAll(nowUs);
   coinProcessRing(nowUs);
   pulseOutputTick(nowUs);
-  engineTick(deltaUs);
-  statsTick(deltaUs);
   buzzerTick(nowUs);
   factoryResetPoll(nowUs);
   lcdTick(nowUs);
