@@ -1,3 +1,4 @@
+
 ## Table of Contents
 
 1. [What This Controller Does](#1-what-this-controller-does)
@@ -21,7 +22,6 @@
 19. [Factory Reset and PIN Recovery](#19-factory-reset-and-pin-recovery)
 20. [Troubleshooting](#20-troubleshooting)
 21. [Developer Notes](#21-developer-notes)
-
 ---
 
 ## 1. What This Controller Does
@@ -52,14 +52,14 @@ The machine keeps working even if the LCD, the buzzer or Wi-Fi clients are absen
 
 ## 3. Wiring Reference
 
-Default pin map. **Every pin is reassignable** in the web panel (Settings → Buttons & Relays); the controller rejects configurations with duplicate pins or pins that are unsafe on the ESP32, so you cannot burn a config that double-books a GPIO.
+Default pin map for this v2 build. **Every pin is reassignable** in the web panel (Settings → Buttons & Relays); the controller rejects configurations with duplicate pins or pins that are unsafe on the ESP32, so you cannot burn a config that double-books a GPIO.
 
 | Connection | GPIO | Notes |
 |---|---|---|
-| WATER relay | 13 | Relay module input IN1 |
-| BLOWER relay | 16 | Relay module input IN2 |
-| SOAP relay | 17 | Relay module input IN3 |
-| FOAM relay | 18 | Relay module input IN4 |
+| WATER relay | **19** | Relay module input IN1 |
+| BLOWER relay | **18** | Relay module input IN2 |
+| SOAP relay | **17** | Relay module input IN3 |
+| FOAM relay | **16** | Relay module input IN4 |
 | WATER button | 32 | Button connects GPIO to GND |
 | BLOWER button | 33 | Button connects GPIO to GND |
 | SOAP button | 27 | Button connects GPIO to GND |
@@ -71,7 +71,9 @@ Default pin map. **Every pin is reassignable** in the web panel (Settings → Bu
 | LCD SCL | 22 | I2C clock |
 | BOOT button (on the ESP32 board itself) | 0 | Hold 5 s for factory reset |
 
-**Pins the firmware allows for assignment:** 4, 5, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33 only. The BOOT pin (0) is fixed by validation and cannot be remapped. Input-only pins (34–39) and strapping pins (0, 2, 12, 15) outside that list are deliberately excluded.
+> **v1 → v2 wiring alert:** the relay defaults moved. v1 used WATER 13 / BLOWER 16 / SOAP 17 / FOAM 18. v2 uses **WATER 19 / BLOWER 18 / SOAP 17 / FOAM 16**. A v1 config saved in flash keeps its old pins after a v2 flash — only a **factory-fresh** v2 unit uses the new map. Check the Pin Map card (Settings → Buttons & Relays) after upgrading.
+
+**Pins the firmware allows for assignment:** 4, 5, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33 only. The BOOT pin (0) is fixed by validation and cannot be remapped. Input-only pins (34–39) and strapping pins (0, 2, 12) outside that list are deliberately excluded.
 
 ## 4. Power and Grounding
 
@@ -88,8 +90,9 @@ Default pin map. **Every pin is reassignable** in the web panel (Settings → Bu
    - **Password:** `12345678`
 3. **Open the panel.** The captive portal usually pops up by itself. If not, browse to **http://192.168.4.1** — the dashboard loads live status within a second.
 4. **Secure the panel (recommended).** Settings → General → set a **Panel PIN** (digits only, up to 8 characters). Once set, every write action (start/stop, config save, reset) asks for it. Without a PIN, anyone who joins the Wi-Fi has full control.
-5. **Test without coins.** Settings → Coin has **Simulate 1 / 5 / 10 / 20 pulse** buttons that feed the acceptor logic directly. Simulate a coin, watch the LCD and dashboard update, then press a function button to confirm relay + buzzer + LCD all respond.
-6. **Check relay polarity.** If relays are ON while idle, flip **Settings → Buttons & Relays → "Active low module"** to match your relay board.
+5. **Check the time model.** This v2 build defaults to **Allocated per function** — insert a coin, press WATER, and the whole credit moves into WATER. If you want several functions to run at once on one credit, switch to a shared-pool model first (Settings → General → Time model). See [§11](#11-time-models--how-credit-is-spent).
+6. **Test without coins.** Settings → Coin has **Simulate 1 / 5 / 10 / 20 pulse** buttons that feed the acceptor logic directly. Simulate a coin, watch the LCD and dashboard update, then press a function button to confirm relay + buzzer + LCD all respond.
+7. **Check relay polarity.** If relays are ON while idle, flip **Settings → Buttons & Relays → "Active low module"** to match your relay board.
 
 The access point is self-healing: it is verified every 5 seconds and restarted automatically if it ever disappears. Up to 4 simultaneous clients are allowed by default (configurable 1–8).
 
@@ -107,17 +110,19 @@ The access point is self-healing: it is verified every 5 seconds and restarted a
 - The panel works on phones and desktops, in light or dark theme (theme is remembered per browser).
 - Captive-portal detection is built in for Android (`generate_204`), Apple (`hotspot-detect.html`) and Windows (`connecttest.txt` / `ncsi.txt` etc.), so the login window usually opens automatically on join.
 - The panel needs no internet and never phones home — everything stays on the local network.
-- Password rules: 8–63 printable ASCII characters (or empty for an open network — not recommended). If Wi-Fi credentials are changed in the panel, the new network starts immediately after save; reconnect with the new name/password.
+- Password rules: 8–63 printable ASCII characters (or empty for an open network — not recommended). Saving new credentials restarts the access point within about a second; reconnect with the new name/password.
 
 ## 7. Everyday Operation (Customer Flow)
 
 1. Customer inserts a coin (or bill) into the acceptor.
 2. The burst of pulses is decoded; on completion the buzzer beeps and the LCD shows for 2.5 seconds: pulse count, credit added, and the running total.
 3. Customer presses a function button once → that function starts (two short beeps).
-4. LCD rows update live; the last-used function's timer blinks.
-5. When the credit pool empties, every running function stops automatically and its relay releases. An unfinished pause simply holds its state until credit returns or the run cap expires.
+   - In the default **allocated** model, the **entire credit balance moves into that function** and the other buttons stay inactive until it stops.
+   - In a **shared** model, several functions can run at once from the same pool.
+4. LCD rows update live; a paused function blinks its timer as a reminder.
+5. When credit runs out, every running function stops automatically and its relay releases. An unfinished pause simply holds its state until credit returns or the run cap expires.
 
-**What is never lost:** unused paid time. In shared mode it stays in the pool; in allocated mode the unused remainder returns to the pool when the function stops (stop, timeout, or model change).
+**What is never lost:** unused paid time. In shared mode it stays in the pool; in allocated mode the unused remainder returns to the pool when the function stops (button stop, timeout, or model change).
 
 **What *is* lost on reboot:** remaining credit. The pool lives in RAM by design (flash-wear protection); any restart — power cut, manual reboot, watchdog — clears it to zero. Saved statistics are committed at most every 5 minutes, so use *Commit statistics now* (Settings → System) before planned shutdowns.
 
@@ -127,13 +132,14 @@ Each function button supports three gestures (timings configurable in Settings �
 
 | Gesture | Default timing | Action |
 |---|---|---|
-| Single press | — | Start the function (or resume if paused) |
+| Single press | — | Start the function; resume if paused; **in allocated mode, first top up that function from the pool (up to the credit cap)** |
 | Double press | within 350 ms | Pause a running function (relay off, time kept); double press again to resume |
-| Long press | ≥ 900 ms | Add bonus time (default +60 s) if bonus is enabled — see §12 |
+| Long press | ≥ 900 ms | Add bonus time (default +60 s) if bonus is enabled — see [§12](#12-bonus-time-long-press) |
 
 Extra behaviours baked in:
 
 - Starting with no credit available → error beep, nothing runs.
+- Pressing a button while that function is already running → short click beep (no state change; use double press to pause).
 - Pausing a function never refunds time; the pause simply freezes consumption.
 - The buzzer gives distinct patterns for coin accepted, start, pause, stop, error and factory-reset events (patterns can be tested one by one in Settings → Buzzer).
 
@@ -155,7 +161,7 @@ FOAM   --:-- PAUS
 | `REDY` | Credit available, function idle, ready to start |
 | `OFF`  | No credit in the pool |
 
-- The row of the **last-used function blinks its timer** so the customer always knows which function they are controlling.
+- **Paused functions blink their timer** (on/off at the configured blink rate, default 500 ms) so the customer sees what is on hold. The blinking stops when the function resumes. *(v1 blinked the last-selected running function instead.)*
 - Accepted coins take over the screen for 2.5 s (pulses, credit added, running total), then the four rows return.
 - Overlay messages (factory-reset countdown, etc.) temporarily replace rows and time out by themselves.
 - A disconnected LCD never blocks operation: the I2C bus is re-probed every 15 seconds and the display resumes when reconnected.
@@ -203,9 +209,9 @@ The time model (Settings → General) decides how the credit pool drains while f
 
 | Model | Behaviour | Best for |
 |---|---|---|
-| **Shared pool · single rate** *(default)* | Any mix of functions can run together; pool drains 1 s per second *in total*. Two hours of credit lasts two hours however many functions run. | Simplest customer understanding; consumables cost roughly the same across functions |
+| **Shared pool · single rate** | Any mix of functions can run together; pool drains 1 s per second *in total*. Two hours of credit lasts two hours however many functions run. | Simplest customer understanding; consumables cost roughly the same across functions |
 | **Shared pool · per-function drain** | Pool drains 1 s per second **per running function** — two functions running burns credit twice as fast. | Electricity/consumables cost about the same per function |
-| **Allocated per function** | Starting a function moves the **whole** credit balance into that function; other buttons stay OFF until it stops or credit runs out. Unused time returns to the pool on stop. | Stage-by-stage washing: water first, then foam, then blower |
+| **Allocated per function** *(v2 default)* | Starting a function moves the **whole** credit balance into that function; other buttons stay OFF until it stops or credit runs out. Unused time returns to the pool on stop. A single press on a running function tops it back up from the pool, up to the credit cap. | Stage-by-stage washing: water first, then foam, then blower |
 
 Safety caps that apply regardless of model:
 
@@ -220,6 +226,7 @@ Long-pressing a function button adds bonus time (default +60 s) to that function
 - **Budget cap:** at most 600 s (10 min) of bonus per credit cycle (`maxBonusSeconds`).
 - **The budget resets each time a coin is accepted**, so long-press abuse can never accumulate unlimited free time — every fresh coin buys a fresh 10-minute bonus allowance.
 - Bonus seconds are tracked separately in statistics (`bonusSeconds`), so you can see how much free time you are giving away.
+- In allocated mode, bonus fills the channel's remaining-time balance (capped); in shared modes it fills the pool.
 
 ## 13. The Web Panel Page by Page
 
@@ -237,7 +244,7 @@ Nine pages, reached from the left sidebar:
 | **Settings · Wi-Fi AP** | Network name, password, channel, hidden mode, max clients, live client count |
 | **Settings · System** | Diagnostics, config backup/restore, commit statistics, restart, reset statistics, factory reset |
 
-**How saving works:** each settings page has its own Save button; values are validated *by the controller* before storage. An out-of-range value or pin conflict is rejected with the offending field's name shown in the UI. Good values are written to two alternating flash slots with a CRC, so even a power cut mid-write cannot lose your configuration — the previous good copy is used.
+**How saving works:** each settings page has its own Save button; values are validated *by the controller* before storage. An out-of-range value or pin conflict is rejected with the offending field's name shown in the UI. Good values are written to two alternating flash slots with a CRC, so even a power cut mid-write cannot lose your configuration — the previous good copy is used. The panel then **waits for the controller to confirm** the new configuration revision before reporting success; if the controller is busy with another save it answers "busy" (HTTP 503) and the panel tells you to retry.
 
 **PIN protection:** once a Panel PIN is set, every write action prompts for it (the browser remembers it for the session). Read-only pages (Dashboard, Diagnostics) stay viewable without a PIN so attendants can monitor.
 
@@ -249,7 +256,7 @@ All defaults and allowed ranges, as enforced by `validateConfig()`:
 
 | Setting | Default | Range | Meaning |
 |---|---:|---|---|
-| `timeModel` | 0 (shared single) | 0–2 | See §11 |
+| `timeModel` | 2 (allocated) | 0–2 | See [§11](#11-time-models--how-credit-is-spent) |
 | `longPressAddSeconds` | 60 | 0–3600 (must be > 0 if bonus enabled) | Bonus seconds per long press |
 | `maxBonusSeconds` | 600 | 0–86400 | Bonus budget per credit cycle |
 | `maxRunSeconds` | 7200 | 60–86400 | Force-stop cap per continuous run |
@@ -289,7 +296,7 @@ All defaults and allowed ranges, as enforced by `validateConfig()`:
 
 | Setting | Default | Range | Meaning |
 |---|---:|---|---|
-| `relayPin[4]` | 13/16/17/18 | allowed pin list | Relay outputs |
+| `relayPin[4]` | **19/18/17/16** | allowed pin list | Relay outputs |
 | `relayActiveLow` | 1 (active low) | 0/1 | Trigger polarity |
 
 ### LCD
@@ -302,7 +309,7 @@ All defaults and allowed ranges, as enforced by `validateConfig()`:
 | `lcdSda` / `lcdScl` | 21 / 22 | allowed pin list | I2C pins |
 | `lcdBacklight` | 1 | 0/1 | Backlight |
 | `lcdRefreshMs` | 250 | 50–2000 | Update rate |
-| `lcdBlinkMs` | 500 | 120–2000 | Timer blink rate |
+| `lcdBlinkMs` | 500 | 120–2000 | Paused-timer blink rate |
 
 ### Buzzer
 
@@ -326,18 +333,18 @@ All defaults and allowed ranges, as enforced by `validateConfig()`:
 
 ## 15. API Reference (Advanced)
 
-For custom integrations (home automation, kiosk software, scripts). Base URL `http://192.168.4.1`. Write endpoints require the PIN (if set) via `X-Pin` header or `pin` form field.
+For custom integrations (home automation, kiosk software, scripts). Base URL `http://192.168.4.1`. Write endpoints require the PIN (if set) via `X-Pin` header or `pin` form field. Request bodies are line-oriented `key=value` text (one pair per line).
 
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/ping` | GET | Liveness check |
-| `/api/state` | GET | Live state (pool, channels, LCD lines, AP status) |
+| `/api/state` | GET | Live state (pool, channels, LCD lines, AP status, config revision) |
 | `/api/stats` | GET | Full statistics (revenue, coins, days, sessions) |
-| `/api/diag` | GET | Diagnostics (heap, resets, pulse counters, config revision) |
+| `/api/diag` | GET | Diagnostics (heap, resets, pulse counters, config revision, pins) |
 | `/api/config` | GET | Current configuration |
-| `/api/config` | POST | Apply a configuration (line-oriented `key=value` body, validated) |
+| `/api/config` | POST | Apply a configuration (validated; returns new `cfgRevision`; "busy" 503 if a save is already in flight) |
 | `/api/config/defaults` | POST | Reset configuration to factory defaults (keeps stats) |
-| `/api/backup` | GET | Download configuration as a text file |
+| `/api/backup` | GET | Download configuration as a JSON file |
 | `/api/restore` | POST | Restore a backup (same handler as config POST) |
 | `/api/channel` | POST | Control a function: `ch=0..3`, `action` = start / pause / resume / stop / toggle / add, optional `seconds` (≤ 3600) |
 | `/api/credit` | POST | Add owner credit: `seconds` (1–86400) |
@@ -356,7 +363,7 @@ curl -X POST http://192.168.4.1/api/channel \
   -d "ch=0" -d "action=start" -d "pin=1234"
 ```
 
-All responses are JSON. Errors come back as `{"ok":0,"error":"<field>"}` with HTTP 400/401/413/503 as appropriate.
+All responses are JSON. Errors come back as `{"ok":0,"error":"<field>"}` with HTTP 400/401/413/503 as appropriate. Write commands are **queued and executed by the control loop** (reboot and factory reset execute ~0.7 s later, statistics resets ~0.12 s later), so an "ok" reply means *queued*, not yet applied — poll `/api/state` (`cfgRevision`, pool, channel states) to confirm.
 
 ## 16. Statistics and Sales Tracking
 
@@ -366,19 +373,19 @@ The controller tracks, and never forgets across reboots:
 - **Bonus seconds given away** (separate from paid time)
 - **Runtime and session counts per function**
 - **Daily ledger** — a 32-day ring of per-day revenue/coins/seconds (viewed on the Sales Inventory page with the 14-day chart)
-- **Session journal** — the last 16 wash sessions with channel, duration and end reason (idle stop, pool empty, run cap, manual stop, mode change)
+- **Session journal** — the last 16 wash sessions with channel, duration and end reason (1 = credit exhausted, 2 = run-cap limit, 3 = resume with no credit, 4 = stopped, 5 = model change)
 
 Notes:
 
 - Statistics are committed to flash every 5 minutes by default (configurable) to protect flash lifespan. Use **Commit statistics now** before powering down.
 - **Reset statistics** (Settings → System) clears revenue/coins/days/sessions but keeps total uptime and boot count.
-- The **Sales Inventory** page exports the full ledger as CSV for bookkeeping.
+- The **Sales Inventory** page exports the ledger and per-function totals as CSV for bookkeeping.
 - Simulated coins count as **credit added but not as revenue**; owner credit likewise. Only real acceptor coins with preset values add revenue.
 
 ## 17. Backup, Restore and Cloning
 
-1. **Download:** Settings → System → *Download configuration* → saves a small text file (`key=value` lines) with every setting.
-2. **Restore:** Settings → System → paste or upload that file → the controller validates and applies it. Restoring a backup from another unit is the fastest way to clone a fleet of machines.
+1. **Download:** Settings → System → *Download configuration* → saves a small text file (`key=value` lines, `carwash-config.txt`) with every setting.
+2. **Restore:** Settings → System → *Restore configuration* → pick the file → the controller validates and applies it, then the panel waits for the revision confirmation. Restoring a backup from another unit is the fastest way to clone a fleet of machines.
 3. The backup contains the Wi-Fi credentials and PIN too — store it securely.
 4. Configuration history is protected by the dual-slot scheme: every save alternates between two flash slots with a CRC; a corrupt or interrupted write falls back to the previous good copy automatically. The active slot and total writes are visible in Diagnostics.
 
@@ -387,10 +394,11 @@ Notes:
 | System | Behaviour |
 |---|---|
 | **Run cap** | Any function running longer than `maxRunSeconds` (default 2 h) is force-stopped to protect pumps and motors |
-| **Low-heap watchdog** | If free memory stays below 12 kB (or the largest free block below 6 kB) across four 30-second checks: relays off → statistics saved → restart. Visible as "low-heap restarts" in Diagnostics |
+| **Low-heap watchdog** | If free memory stays below 12 kB (or the largest free block below 6 kB) across four 30-second checks: relays off → statistics saved → restart. Visible as "low heap strikes" in Diagnostics |
 | **Flash-wear control** | Statistics written at most every `statsSaveIntervalSec` (default 300 s); configuration only on explicit saves |
 | **AP self-heal** | Access point verified every 5 s, restarted automatically if missing; AP restart and Wi-Fi failure counters visible in Diagnostics |
 | **Dual-slot config** | Two alternating flash slots + CRC; a bad write falls back to the last good copy |
+| **Session-ring guard** | Statistics loaded from flash are checked for sane journal pointers; corrupt data falls back to defaults instead of crashing |
 | **LCD hot-plug** | Missing display never blocks operation; bus re-probed every 15 s |
 | **Captive portal** | Full redirect set for Android/Apple/Windows detection |
 | **Clean restart** | System → Restart performs: relays off → statistics committed → reboot |
@@ -399,7 +407,7 @@ Notes:
 
 ## 19. Factory Reset and PIN Recovery
 
-A factory reset erases **everything** — configuration, statistics, session journal, Wi-Fi credentials — and reboots with the defaults from this guide (network `ESP32_4in1_Carwash` / `12345678`, default pins and pricing).
+A factory reset erases **everything** — configuration, statistics, session journal, Wi-Fi credentials — and reboots with the defaults from this guide (network `ESP32_4in1_Carwash` / `12345678`, **v2 default pins** WATER 19 / BLOWER 18 / SOAP 17 / FOAM 16, **allocated time model**, default pricing).
 
 Two ways to trigger it:
 
@@ -408,33 +416,35 @@ Two ways to trigger it:
 
 **Forgot the Panel PIN?** The BOOT-button reset is the recovery path — there is no PIN bypass by design. After the wipe, set a new PIN and restore your configuration backup to be running again in a couple of minutes.
 
-**Reset statistics only** (keep settings): Settings → System → *Reset statistics*.
+**Reset statistics only** (keep settings): Settings → System → *Reset sales statistics*.
 
 ## 20. Troubleshooting
 
 | Symptom | Likely cause and fix |
 |---|---|
-| **Coins not counted** | 1) Missing common ground between acceptor and ESP32 — the #1 cause. 2) Pulse wire not on GPIO 25. 3) Check "dropped pulses" in Diagnostics; if pulses arrive but are dropped, increase `coinMinPulseGapMs`. 4) Bill validators sending long bursts — raise `coinGroupGapMs` so the group can finish. |
+| **Coins not counted** | 1) Missing common ground between acceptor and ESP32 — the #1 cause. 2) Pulse wire not on GPIO 25. 3) Check "dropped coin pulses" in Diagnostics; if pulses arrive but are dropped, increase `coinMinPulseGapMs`. 4) Bill validators sending long bursts — raise `coinGroupGapMs` so the group can finish. |
 | **Relays inverted (ON when idle)** | Relay board trigger polarity mismatch — toggle "Active low module" in Settings → Buttons & Relays. |
+| **Wrong relay fires** | You upgraded v1→v2 firmware and expected the new pin map — a saved v1 config keeps its old pins. Check the Pin Map card, or factory reset to adopt v2 defaults. |
+| **Only one function works at a time** | That is the v2 default **allocated** model working as designed. Switch the time model to a shared pool (Settings → General) to run several functions on one credit. |
 | **LCD blank** | 1) Check 5 V supply. 2) SDA/SCL on 21/22. 3) Try address 0x3F in Settings → LCD (backpack address varies by batch). The machine itself keeps working regardless. |
 | **Panel won't open** | Confirm the client is on `ESP32_4in1_Carwash`; browse to `http://192.168.4.1` directly. More than 4 clients connected? Raise `apMaxClients` (up to 8). |
-| **Forgot PIN** | Hold BOOT 5 s → factory reset → reconfigure (§19). |
-| **Credit disappeared** | A restart or power cut cleared the pool — credit is RAM-only by design (§7). Also check the time model: per-function drain burns credit faster with several functions running. |
-| **Wrong amount credited** | A pulse group matching no preset is prorated from the nearest lower preset (§10). Give that exact pulse count its own preset so every coin matches. |
-| **Keeps rebooting** | Read "reset reason" in Diagnostics. Low-heap restarts → power supply problem. Brownout → the 5 V rail sags when relays switch; bigger supply or bulk capacitors (§4). |
-| **Function won't start** | 1) No credit (LCD shows OFF). 2) In allocated mode another function holds the credit. 3) Run cap reached — stop the function first. |
+| **Forgot PIN** | Hold BOOT 5 s → factory reset → reconfigure ([§19](#19-factory-reset-and-pin-recovery)). |
+| **Credit disappeared** | A restart or power cut cleared the pool — credit is RAM-only by design ([§7](#7-everyday-operation-customer-flow)). Also check the time model: per-function drain burns credit faster with several functions running. |
+| **Wrong amount credited** | A pulse group matching no preset is prorated from the nearest lower preset ([§10](#10-coin-and-bill-acceptor-setup)). Give that exact pulse count its own preset so every coin matches. |
+| **Keeps rebooting** | Read "reset reason" in Diagnostics. Low-heap restarts → power supply problem. Brownout → the 5 V rail sags when relays switch; bigger supply or bulk capacitors ([§4](#4-power-and-grounding)). |
+| **Function won't start** | 1) No credit (LCD shows OFF). 2) In allocated mode another function holds the credit — stop it first. 3) Run cap reached — stop the function first. |
 | **Buttons dead** | Buttons wire GPIO→GND (not to 5 V!). Check the pin map in Settings → Buttons & Relays. |
 | **Buzzer silent** | Check `buzzerEnabled`, the pin, and that the buzzer is passive (tone-driven), not an active self-oscillating one. |
+| **"Save timed out" in the panel** | The controller did not confirm the new revision in time (it was busy or the network hiccupped). Check your values and press Save again; nothing is half-applied — configs apply atomically. |
 | **Two customers, one machine** | Not supported — one shared credit pool per controller; a second bay needs a second controller. |
 
 ## 21. Developer Notes
 
-- **Firmware identity:** `Carwash 4-in-1 Controller` v1.2.0, build tag 2026.11.21.
+- **Firmware identity:** `Carwash 4-in-1 Controller` v1.2.0, build tag 2026.11.21 (v2 source, 6,604 lines).
 - **Libraries used:** `WiFi`, `WebServer`, `DNSServer`, `Preferences`, `Wire`, `LiquidCrystal_I2C`, `esp_timer` — all standard ESP32 Arduino core components; no third-party dependencies.
-- **Storage layout (NVS namespace `cw4in1`):** `cfgA`/`cfgB` = alternating config slots (magic 0x34574331, version 3), `meta` = slot selector + write counter, `stat` = statistics blob (magic 0x53544154, version 3).
-- **Task model:** web server + DNS run on core 0 (stack 12 KB, priority 1); the real-time control loop (coins, buttons, relays, LCD, buzzers) runs on the main task so web activity can never stall a wash in progress. Commands from the web flow through a queue to the control side.
-- **Web UI:** a single embedded HTML page (no CDN, no internet dependency) ~6 KB JSON buffer, 4 KB form limit.
-- **Known harmless quirks in v1.2.0** (verified by code audit): a few unused constants and counters exist (`CONTROL_SLICE_US`, `RUNNING_WINDOW_US`, `RELAY_SETTLE_MS`, `SESSION_SAVE_MIN_US`, `g_coinIsrCount/Seen`, `g_factoryConfirmed`, `g_cfgShadow`); the `restartRequired` flag is published in API JSON but never set to 1. None affect operation.
-- **Web panel route map:** the UI uses hash routes (`#/dashboard`, `#/inventory`, `#/settings-general`, `#/settings-coin`, `#/settings-lcd`, `#/settings-io`, `#/settings-buzzer`, `#/settings-wifi`, `#/settings-system`).
-
----
+- **Storage layout (NVS namespace `cw4in1`):** `cfgA`/`cfgB` = alternating config slots (magic 0x34574331, version 3), `meta` = slot selector + write counter, `stat` = statistics blob (magic 0x53544154, version 3, journal pointers validated on load).
+- **Task model:** web server + DNS run on core 0 (stack 12 KB, priority 1); the real-time control loop (coins, buttons, relays, LCD, buzzers) runs on the main task so web activity can never stall a wash in progress. Commands from the web flow through an 8-slot queue; the control loop takes only commands whose scheduled time has arrived, so a delayed command never blocks urgent ones.
+- **Config pipeline:** web handler → `configPushIfCurrent` (one pending save at a time, guarded by revision) → control loop validates → saves to the alternate slot → applies live (pins re-attached, LCD re-init, AP deferred restart) → bumps `cfgRevision` → panel confirms by watching `/api/state`.
+- **Web UI:** a single embedded HTML page (no CDN, no internet dependency), ~6 KB JSON buffer, 4 KB form limit, 1 s live polling with exponential backoff when offline.
+- **Known harmless quirks in this build** (verified by code audit): a few unused constants and variables exist (`CONTROL_SLICE_US`, `RUNNING_WINDOW_US`, `RELAY_SETTLE_MS`, `SESSION_SAVE_MIN_US`, `cmdPop()`, `g_coinIsrCount/Seen`, `g_factoryConfirmed`, `g_cfgShadow`); the `restartRequired` flag is published in API JSON but never set to 1. None affect operation.
+- **Web panel route map:** the UI uses hash routes (`#/dashboard`, `#/inventory`, `#/settings/general`, `#/settings/coin`, `#/settings/lcd`, `#/settings/io`, `#/settings/buzzer`, `#/settings/wifi`, `#/settings/system`).
