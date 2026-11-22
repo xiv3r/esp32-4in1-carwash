@@ -34,21 +34,16 @@ jobs:
         arduino-cli core install esp32:esp32
 
         # Install libraries
-        arduino-cli lib install "ArduinoJson"
-        arduino-cli lib install "RTClib"
-
+        arduino-cli lib install "LiquidCrystal I2C"
+        
         # Compile firmware
         cd ESP32-S3
         mv *.ino ESP32-S3.ino
         arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB --output-dir firmware .
         
         # Rename
-        rm firmware/*.ino.bin             
-        rm firmware/*.ino.bootloader.bin  
-        rm firmware/*.ino.partitions.bin
-        
         mv firmware/*.ino.merged.bin      firmware/esp32s3-4in1-0x0.bin
-        mv firmware/*.bin .
+        mv firmware/esp32s3-4in1-0x0.bin .
 
     - name: Commit firmware binary
       run: |
