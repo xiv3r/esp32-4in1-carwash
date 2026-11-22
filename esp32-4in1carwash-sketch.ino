@@ -1,5 +1,5 @@
 // ======================================================
-// ESP32 38Pin 4IN1 CARWASH SYSTEM 
+// ESP32 38Pins 4in1 CARWASH VENDO SYSTEM
 // ======================================================
 
 #include <Arduino.h>
@@ -698,8 +698,13 @@ static bool validateConfig(const Config& cfg, char* err, size_t errLen) {
     safeCopyString(err, errLen, "timeModel");
     return false;
   }
-  if (!isPrintableAscii(cfg.apSsid, 32) || strlen(cfg.apSsid) < 1 || strlen(cfg.apSsid) > 32) {
+  if (memchr(cfg.apSsid, '\0', sizeof(cfg.apSsid)) == nullptr ||
+      !isPrintableAscii(cfg.apSsid, 32) || strlen(cfg.apSsid) < 1 || strlen(cfg.apSsid) > 32) {
     safeCopyString(err, errLen, "apSsid");
+    return false;
+  }
+  if (memchr(cfg.apPass, '\0', sizeof(cfg.apPass)) == nullptr) {
+    safeCopyString(err, errLen, "apPass");
     return false;
   }
   size_t passLen = strlen(cfg.apPass);
@@ -707,7 +712,8 @@ static bool validateConfig(const Config& cfg, char* err, size_t errLen) {
     safeCopyString(err, errLen, "apPass");
     return false;
   }
-  if (strlen(cfg.adminPin) > 8 || !isDigitsOnly(cfg.adminPin)) {
+  if (memchr(cfg.adminPin, '\0', sizeof(cfg.adminPin)) == nullptr ||
+      strlen(cfg.adminPin) > 8 || !isDigitsOnly(cfg.adminPin)) {
     safeCopyString(err, errLen, "adminPin");
     return false;
   }
@@ -3135,6 +3141,12 @@ static void handleApiConfigPost() {
     jsonSendError(400, err);
     return;
   }
+  for (uint8_t i = 0; i < next.coinMapCount; ++i) {
+    if (next.coinMap[i].pulses > next.coinMaxPulses) {
+      jsonSendError(400, "coinMaxPulses");
+      return;
+    }
+  }
   if (!configPushIfCurrent(next, g_pubLocal.state.cfgRevision)) {
     jsonSendError(503, "busy");
     return;
@@ -3278,7 +3290,8 @@ static void handleApiCoinSimulate() {
     return;
   }
   uint32_t pulses = 0;
-  if (!formGetU32(formBodyPtr(), "pulses", pulses) || pulses == 0 || pulses > 200UL) {
+  if (!formGetU32(formBodyPtr(), "pulses", pulses) || pulses == 0 ||
+      pulses > (uint32_t)g_pubLocal.cfg.coinMaxPulses) {
     jsonSendError(400, "pulses");
     return;
   }
@@ -5743,8 +5756,8 @@ FOAM  --:-- OFF</div>
       return;
     }
     var payload = collectFields(form);
-    if (!("bonusEnabled" in payload)) { payload.bonusEnabled = num(app.cfg && app.cfg.bonusEnabled, 1); }
-    if (!payload.bonusEnabled && num(payload.longPressAddSeconds, 0) === 0 && "longPressAddSeconds" in payload) {
+    var bonusOn = ("bonusEnabled" in payload) ? num(payload.bonusEnabled, 0) : num(app.cfg && app.cfg.bonusEnabled, 1);
+    if (!bonusOn && num(payload.longPressAddSeconds, 0) === 0 && "longPressAddSeconds" in payload) {
       toast("err", "Long press needs a value", "Bonus is disabled so the long press add time must be at least one second.");
       return;
     }
@@ -5777,13 +5790,14 @@ FOAM  --:-- OFF</div>
   const channelAction = function (index, action) {
     var payload = { ch: index, action: action };
     if (action === "add") { payload.seconds = 60; }
-    withPinRetry(function () { return apiPost("api/channel", payload); }).then(function (res) {
+    return withPinRetry(function () { return apiPost("api/channel", payload); }).then(function (res) {
       if (!res || res.ok !== 1) {
         toast("err", "Command rejected", res && res.error ? String(res.error) : "Try again.");
-        return;
+        return false;
       }
       loadState().catch(function () {});
-    }).catch(function () { toast("err", "Network error", "Command not sent."); });
+      return true;
+    }).catch(function () { toast("err", "Command not sent", "PIN or network error."); return false; });
   }
 
   const bindEvents = function () {
@@ -5848,12 +5862,16 @@ FOAM  --:-- OFF</div>
       });
     });
 
-    $("#btnStartAll").addEventListener("click", function () {
-      [0, 1, 2, 3].forEach(function (i) { channelAction(i, "start"); });
-    });
-    $("#btnStopAll").addEventListener("click", function () {
-      [0, 1, 2, 3].forEach(function (i) { channelAction(i, "stop"); });
-    });
+    var allBusy = false;
+    const allChannels = function (action) {
+      if (allBusy) return;
+      allBusy = true;
+      [0, 1, 2, 3].reduce(function (chain, i) {
+        return chain.then(function (ok) { return ok ? channelAction(i, action) : false; });
+      }, Promise.resolve(true)).then(function () { allBusy = false; }, function () { allBusy = false; });
+    };
+    $("#btnStartAll").addEventListener("click", function () { allChannels("start"); });
+    $("#btnStopAll").addEventListener("click", function () { allChannels("stop"); });
 
     $("#btnAddCredit").addEventListener("click", function () {
       var seconds = num($("#creditSeconds").value, 0);
