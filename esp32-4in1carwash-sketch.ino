@@ -1,5 +1,5 @@
 // ======================================================
-// ESP32 38Pins 4in1 CARWASH VENDO SYSTEM
+// ESP32 38Pins 4in1 Carwash Vendo System
 // ======================================================
 
 #include <Arduino.h>
@@ -51,7 +51,7 @@
 #define AP_GUARD_INTERVAL_US    5000000ULL
 #define LCD_PROBE_INTERVAL_US   15000000ULL
 #define SESSION_SAVE_MIN_US     2000000ULL
-#define LCD_MAX_SECONDS         3599999ULL
+#define LCD_MAX_SECONDS         8639999ULL
 #define RELAY_SETTLE_MS         0
 
 // ======================================================
@@ -478,6 +478,7 @@ static void lcdTick(uint64_t nowUs);
 static void lcdRenderRows(uint64_t nowUs);
 static void lcdFlushRows();
 static void lcdFlushOverlayNow();
+static void lcdFormatTime(uint64_t remainMs, char* out, size_t outLen);
 static void buzzerPlay(uint8_t pattern);
 static void buzzerSilence();
 static void statsMarkDirty();
@@ -1945,14 +1946,11 @@ static void coinAcceptAward(const CoinAward& award, uint32_t pulses) {
   g_share.lastCoinUs = timeNowUs();
   buzzerPlay(BUZ_COIN);
   snprintf(g_overlay[0], sizeof(g_overlay[0]), "COIN  %02u PULSE", (unsigned)pulses);
-  snprintf(g_overlay[1], sizeof(g_overlay[1]), "CREDIT +%02u:%02u",
-           (unsigned)(grantedSec / 60ULL), (unsigned)(grantedSec % 60ULL));
-  uint64_t totalSec = g_poolMs / 1000ULL;
-  if (totalSec > 359999ULL) {
-    totalSec = 359999ULL;
-  }
-  snprintf(g_overlay[2], sizeof(g_overlay[2]), "TOTAL   %u:%02u",
-           (unsigned)(totalSec / 60ULL), (unsigned)(totalSec % 60ULL));
+  char formatted[12];
+  lcdFormatTime(grantedSec * 1000ULL, formatted, sizeof(formatted));
+  snprintf(g_overlay[1], sizeof(g_overlay[1]), "ADD %s", formatted);
+  lcdFormatTime(g_poolMs, formatted, sizeof(formatted));
+  snprintf(g_overlay[2], sizeof(g_overlay[2]), "POOL %s", formatted);
   snprintf(g_overlay[3], sizeof(g_overlay[3]), "SELECT  FUNCTION");
   g_overlayActive = 1;
   g_overlayUntilUs = timeNowUs() + 2500000ULL;
@@ -2185,29 +2183,21 @@ static void lcdInit() {
 // ======================================================
 
 static void lcdFormatTime(uint64_t remainMs, char* out, size_t outLen) {
-  uint64_t sec = remainMs / 1000ULL;
+  uint64_t sec = remainMs / 1000ULL + ((remainMs % 1000ULL) != 0 ? 1ULL : 0ULL);
   if (sec > LCD_MAX_SECONDS) {
     sec = LCD_MAX_SECONDS;
   }
   uint32_t total = (uint32_t)sec;
-  if (total < 6000UL) {
-    snprintf(out, outLen, "%02u:%02u", (unsigned)(total / 60UL), (unsigned)(total % 60UL));
-  } else {
-    snprintf(out, outLen, "%u:%02u", (unsigned)(total / 3600UL), (unsigned)((total / 60UL) % 60UL));
-  }
+  snprintf(out, outLen, "%02u:%02u:%02u:%02u", (unsigned)(total / 86400UL),
+           (unsigned)((total / 3600UL) % 24UL), (unsigned)((total / 60UL) % 60UL),
+           (unsigned)(total % 60UL));
 }
 
 static const char* lcdStateText(uint8_t ch) {
-  if (g_ch[ch].state == CHS_RUNNING) {
-    return "RUN ";
-  }
-  if (g_ch[ch].state == CHS_PAUSED) {
-    return "PAUS";
-  }
-  if (channelRemainingMs(ch) > 0) {
-    return "REDY";
-  }
-  return "OFF ";
+  if (g_ch[ch].state == CHS_RUNNING) return "R";
+  if (g_ch[ch].state == CHS_PAUSED) return "P";
+  if (channelRemainingMs(ch) > 0) return "A";
+  return "-";
 }
 
 static void lcdPadRow(char* row, size_t len) {
@@ -2233,7 +2223,7 @@ static void lcdPadRow(char* row, size_t len) {
 // ======================================================
 
 static void lcdBuildChannelRow(uint8_t ch, uint64_t nowUs, char* out, size_t outLen) {
-  char timeText[8];
+  char timeText[12];
   bool blinkOff = false;
   if (g_ch[ch].state == CHS_PAUSED) {
     uint64_t blinkIntervalUs = (uint64_t)g_cfg.lcdBlinkMs * 1000ULL;
@@ -2243,15 +2233,16 @@ static void lcdBuildChannelRow(uint8_t ch, uint64_t nowUs, char* out, size_t out
     }
   }
   uint64_t remain = channelRemainingMs(ch);
-  if (g_ch[ch].state == CHS_IDLE && remain == 0) {
-    safeCopyString(timeText, sizeof(timeText), "--:--");
-  } else {
-    lcdFormatTime(remain, timeText, sizeof(timeText));
-  }
+  lcdFormatTime(remain, timeText, sizeof(timeText));
   if (blinkOff) {
-    safeCopyString(timeText, sizeof(timeText), "     ");
+    safeCopyString(timeText, sizeof(timeText), "           ");
   }
-  snprintf(out, outLen, "%-5s %s %s", CHANNEL_NAME[ch], timeText, lcdStateText(ch));
+  const char* label = CHANNEL_NAME[ch];
+  if (g_cfg.lcdCols < 20) {
+    static const char* const shortName[CHANNEL_COUNT] = { "W", "B", "S", "F" };
+    label = shortName[ch];
+  }
+  snprintf(out, outLen, "%s %s %s", label, timeText, lcdStateText(ch));
   lcdPadRow(out, outLen);
 }
 
@@ -4619,7 +4610,7 @@ FOAM  --:-- OFF</div>
                 <div class="lcd-meta"><span id="lcdAddrLabel2">0x27</span><span id="lcdBusLabel2">SDA 21 / SCL 22</span></div>
               </div>
               <div class="notice" style="margin-top:14px">
-                <div>Row layout: function name, remaining time, state. Each paused function blinks its counter; the display stops blinking when it resumes.</div>
+                <div>Timer format: days:hours:minutes:seconds. R = running, P = paused, A = available, - = off. A paused timer blinks and stops blinking on resume.</div>
               </div>
             </div>
           </div>
@@ -5018,10 +5009,10 @@ FOAM  --:-- OFF</div>
   const esc = function (s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]; }); }
 
   const fmtClock = function (ms) {
-    var s = Math.max(0, Math.round(ms / 1000));
-    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-    if (h > 0) { return h + ":" + pad(m) + ":" + pad(sec); }
-    return pad(m) + ":" + pad(sec);
+    var s = Math.max(0, Math.ceil(num(ms, 0) / 1000));
+    var days = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+    var m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return pad(days) + ":" + pad(h) + ":" + pad(m) + ":" + pad(sec);
   }
   const fmtMinutes = function (sec) {
     var m = Math.floor(sec / 60);
@@ -5360,7 +5351,7 @@ FOAM  --:-- OFF</div>
   const renderChannels = function (s) {
     var grid = $("#channelGrid");
     if (!grid || !s.ch) { return; }
-    var signature = s.ch.map(function (c) { return c.state + ":" + c.relayOn + ":" + c.blink + ":" + Math.floor(num(c.usedMs, 0) / 60000) + ":" + Math.round(num(c.remMs, 0) / 1000); }).join("|");
+    var signature = s.ch.map(function (c) { return c.state + ":" + c.relayOn + ":" + c.blink + ":" + Math.floor(num(c.usedMs, 0) / 60000) + ":" + Math.ceil(num(c.remMs, 0) / 1000); }).join("|");
     if (grid.getAttribute("data-sig") === signature) { return; }
     grid.setAttribute("data-sig", signature);
     grid.innerHTML = "";
