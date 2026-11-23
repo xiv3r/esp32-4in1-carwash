@@ -58,20 +58,21 @@
 // DEFAULT PIN MAP
 // ======================================================
 
-#define PIN_DEFAULT_RELAY_WATER     17
+#define PIN_DEFAULT_RELAY_WATER   17
 #define PIN_DEFAULT_RELAY_BLOWER  18
-#define PIN_DEFAULT_RELAY_SOAP       13
-#define PIN_DEFAULT_RELAY_FOAM      14
+#define PIN_DEFAULT_RELAY_SOAP    13
+#define PIN_DEFAULT_RELAY_FOAM    14
 #define PIN_DEFAULT_BTN_WATER     6
-#define PIN_DEFAULT_BTN_BLOWER  7
-#define PIN_DEFAULT_BTN_SOAP       15
+#define PIN_DEFAULT_BTN_BLOWER    7
+#define PIN_DEFAULT_BTN_SOAP      15
 #define PIN_DEFAULT_BTN_FOAM      16
-#define PIN_DEFAULT_COIN                  4
-#define PIN_DEFAULT_PULSE_OUT      5
-#define PIN_DEFAULT_BUZZER             21
-#define PIN_DEFAULT_BOOT            0
-#define PIN_DEFAULT_LCD_SDA      8
+#define PIN_DEFAULT_COIN          4
+#define PIN_DEFAULT_PULSE_OUT     5
+#define PIN_DEFAULT_BUZZER        21
+#define PIN_DEFAULT_BOOT          0
+#define PIN_DEFAULT_LCD_SDA       8
 #define PIN_DEFAULT_LCD_SCL       9
+
 
 // ======================================================
 // CHANNEL IDENTITY
